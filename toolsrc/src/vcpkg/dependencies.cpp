@@ -20,14 +20,18 @@ namespace vcpkg::Dependencies
         bool plus = false;
     };
 
+    /// <summary>
+    /// Representation of a package and its features in a ClusterGraph.
+    /// </summary>
     struct Cluster : Util::MoveOnlyBase
     {
-        std::vector<StatusParagraph*> status_paragraphs;
+        InstalledPackageView installed_package;
+
         Optional<const SourceControlFile*> source_control_file;
         PackageSpec spec;
-        std::unordered_map<std::string, FeatureNodeEdges> edges;
-        std::unordered_set<std::string> to_install_features;
-        std::unordered_set<std::string> original_features;
+        std::unordered_map<std::string, FeatureNodeEdges> edges_by_feature;
+        std::set<std::string> to_install_features;
+        std::set<std::string> original_features;
         bool will_remove = false;
         bool transient_uninstalled = true;
         RequestType request_type = RequestType::AUTO_SELECTED;
@@ -63,10 +67,18 @@ namespace vcpkg::Dependencies
         Graphs::Graph<ClusterPtr> install_graph;
     };
 
+    /// <summary>
+    /// Directional graph representing a collection of packages with their features connected by their dependencies.
+    /// </summary>
     struct ClusterGraph : Util::MoveOnlyBase
     {
         explicit ClusterGraph(const PortFileProvider& provider) : m_provider(provider) {}
 
+        /// <summary>
+        ///     Find the cluster associated with spec or if not found, create it from the PortFileProvider.
+        /// </summary>
+        /// <param name="spec">Package spec to get the cluster for.</param>
+        /// <returns>The cluster found or created for spec.</returns>
         Cluster& get(const PackageSpec& spec)
         {
             auto it = m_graph.find(spec);
@@ -88,13 +100,13 @@ namespace vcpkg::Dependencies
             FeatureNodeEdges core_dependencies;
             core_dependencies.build_edges =
                 filter_dependencies_to_specs(scf.core_paragraph->depends, out_cluster.spec.triplet());
-            out_cluster.edges.emplace("core", std::move(core_dependencies));
+            out_cluster.edges_by_feature.emplace("core", std::move(core_dependencies));
 
             for (const auto& feature : scf.feature_paragraphs)
             {
                 FeatureNodeEdges added_edges;
                 added_edges.build_edges = filter_dependencies_to_specs(feature->depends, out_cluster.spec.triplet());
-                out_cluster.edges.emplace(feature->name, std::move(added_edges));
+                out_cluster.edges_by_feature.emplace(feature->name, std::move(added_edges));
             }
             out_cluster.source_control_file = &scf;
         }
@@ -102,30 +114,6 @@ namespace vcpkg::Dependencies
         std::unordered_map<PackageSpec, Cluster> m_graph;
         const PortFileProvider& m_provider;
     };
-
-    std::vector<PackageSpec> AnyParagraph::dependencies(const Triplet& triplet) const
-    {
-        if (const auto p = this->status_paragraph.get())
-        {
-            return PackageSpec::from_dependencies_of_port(p->package.spec.name(), p->package.depends, triplet);
-        }
-
-        if (const auto p = this->binary_control_file.get())
-        {
-            auto deps = Util::fmap_flatten(p->features, [](const BinaryParagraph& pgh) { return pgh.depends; });
-            deps.insert(deps.end(), p->core_paragraph.depends.cbegin(), p->core_paragraph.depends.cend());
-            return PackageSpec::from_dependencies_of_port(p->core_paragraph.spec.name(), deps, triplet);
-        }
-
-        if (const auto p = this->source_control_file.value_or(nullptr))
-        {
-            return PackageSpec::from_dependencies_of_port(
-                p->core_paragraph->name, filter_dependencies(p->core_paragraph->depends, triplet), triplet);
-        }
-
-        Checks::exit_with_message(VCPKG_LINE_INFO,
-                                  "Cannot get dependencies because there was none of: source/binary/status paragraphs");
-    }
 
     std::string to_output_string(RequestType request_type,
                                  const CStringView s,
@@ -154,45 +142,27 @@ namespace vcpkg::Dependencies
     InstallPlanAction::InstallPlanAction() : plan_type(InstallPlanType::UNKNOWN), request_type(RequestType::UNKNOWN) {}
 
     InstallPlanAction::InstallPlanAction(const PackageSpec& spec,
-                                         const SourceControlFile& any_paragraph,
-                                         const std::unordered_set<std::string>& features,
+                                         const SourceControlFile& scf,
+                                         const std::set<std::string>& features,
                                          const RequestType& request_type)
-        : spec(spec), plan_type(InstallPlanType::BUILD_AND_INSTALL), request_type(request_type), feature_list(features)
-    {
-        this->any_paragraph.source_control_file = &any_paragraph;
-    }
-
-    InstallPlanAction::InstallPlanAction(const PackageSpec& spec,
-                                         const std::unordered_set<std::string>& features,
-                                         const RequestType& request_type)
-        : spec(spec), plan_type(InstallPlanType::ALREADY_INSTALLED), request_type(request_type), feature_list(features)
+        : spec(spec)
+        , source_control_file(scf)
+        , plan_type(InstallPlanType::BUILD_AND_INSTALL)
+        , request_type(request_type)
+        , feature_list(features)
     {
     }
 
     InstallPlanAction::InstallPlanAction(const PackageSpec& spec,
-                                         const AnyParagraph& any_paragraph,
+                                         InstalledPackageView&& ipv,
+                                         const std::set<std::string>& features,
                                          const RequestType& request_type)
-        : spec(spec), any_paragraph(any_paragraph), plan_type(InstallPlanType::UNKNOWN), request_type(request_type)
+        : spec(spec)
+        , installed_package(std::move(ipv))
+        , plan_type(InstallPlanType::ALREADY_INSTALLED)
+        , request_type(request_type)
+        , feature_list(features)
     {
-        if (auto p = any_paragraph.status_paragraph.get())
-        {
-            this->plan_type = InstallPlanType::ALREADY_INSTALLED;
-            return;
-        }
-
-        if (auto p = any_paragraph.binary_control_file.get())
-        {
-            this->plan_type = InstallPlanType::INSTALL;
-            return;
-        }
-
-        if (auto p = any_paragraph.source_control_file.get())
-        {
-            this->plan_type = InstallPlanType::BUILD_AND_INSTALL;
-            return;
-        }
-
-        Checks::unreachable(VCPKG_LINE_INFO);
     }
 
     std::string InstallPlanAction::displayname() const
@@ -243,21 +213,35 @@ namespace vcpkg::Dependencies
     ExportPlanAction::ExportPlanAction() : plan_type(ExportPlanType::UNKNOWN), request_type(RequestType::UNKNOWN) {}
 
     ExportPlanAction::ExportPlanAction(const PackageSpec& spec,
-                                       const AnyParagraph& any_paragraph,
+                                       InstalledPackageView&& installed_package,
                                        const RequestType& request_type)
-        : spec(spec), any_paragraph(any_paragraph), plan_type(ExportPlanType::UNKNOWN), request_type(request_type)
+        : spec(spec)
+        , plan_type(ExportPlanType::ALREADY_BUILT)
+        , request_type(request_type)
+        , m_installed_package(std::move(installed_package))
     {
-        if (auto p = any_paragraph.binary_control_file.get())
-        {
-            this->plan_type = ExportPlanType::ALREADY_BUILT;
-            return;
-        }
+    }
 
-        if (auto p = any_paragraph.source_control_file.get())
+    ExportPlanAction::ExportPlanAction(const PackageSpec& spec, const RequestType& request_type)
+        : spec(spec), plan_type(ExportPlanType::PORT_AVAILABLE_BUT_NOT_BUILT), request_type(request_type)
+    {
+    }
+
+    Optional<const BinaryParagraph&> ExportPlanAction::core_paragraph() const
+    {
+        if (auto p_ip = m_installed_package.get())
         {
-            this->plan_type = ExportPlanType::PORT_AVAILABLE_BUT_NOT_BUILT;
-            return;
+            return p_ip->core->package;
         }
+        return nullopt;
+    }
+
+    std::vector<PackageSpec> ExportPlanAction::dependencies(const Triplet&) const
+    {
+        if (auto p_ip = m_installed_package.get())
+            return p_ip->dependencies();
+        else
+            return {};
     }
 
     bool RemovePlanAction::compare_by_name(const RemovePlanAction* left, const RemovePlanAction* right)
@@ -296,33 +280,6 @@ namespace vcpkg::Dependencies
         return nullopt;
     }
 
-    std::vector<InstallPlanAction> create_install_plan(const PortFileProvider& port_file_provider,
-                                                       const std::vector<PackageSpec>& specs,
-                                                       const StatusParagraphs& status_db)
-    {
-        auto fspecs = Util::fmap(specs, [](const PackageSpec& spec) { return FeatureSpec(spec, ""); });
-        auto plan = create_feature_install_plan(port_file_provider, fspecs, status_db);
-
-        std::vector<InstallPlanAction> ret;
-        ret.reserve(plan.size());
-
-        for (auto&& action : plan)
-        {
-            if (auto p_install = action.install_action.get())
-            {
-                ret.push_back(std::move(*p_install));
-            }
-            else
-            {
-                Checks::exit_with_message(VCPKG_LINE_INFO,
-                                          "The installation plan requires feature packages support. Please re-run the "
-                                          "command with --featurepackages.");
-            }
-        }
-
-        return ret;
-    }
-
     std::vector<RemovePlanAction> create_remove_plan(const std::vector<PackageSpec>& specs,
                                                      const StatusParagraphs& status_db)
     {
@@ -352,7 +309,17 @@ namespace vcpkg::Dependencies
                 {
                     if (an_installed_package->package.spec.triplet() != spec.triplet()) continue;
 
-                    const std::vector<std::string>& deps = an_installed_package->package.depends;
+                    std::vector<std::string> deps = an_installed_package->package.depends;
+                    // <hack>
+                    // This is a hack to work around existing installations that put featurespecs into binary packages
+                    // (example: curl[core]) Eventually, this can be returned to a simple string search.
+                    for (auto&& dep : deps)
+                    {
+                        dep.erase(std::find(dep.begin(), dep.end(), '['), dep.end());
+                    }
+                    Util::unstable_keep_if(deps,
+                                           [&](auto&& e) { return e != an_installed_package->package.spec.name(); });
+                    // </hack>
                     if (std::find(deps.begin(), deps.end(), spec.name()) == deps.end()) continue;
 
                     dependents.push_back(an_installed_package->package.spec);
@@ -404,7 +371,7 @@ namespace vcpkg::Dependencies
 
             std::vector<PackageSpec> adjacency_list(const ExportPlanAction& plan) const override
             {
-                return plan.any_paragraph.dependencies(plan.spec.triplet());
+                return plan.dependencies(plan.spec.triplet());
             }
 
             ExportPlanAction load_vertex_data(const PackageSpec& spec) const override
@@ -413,14 +380,14 @@ namespace vcpkg::Dependencies
                                                      ? RequestType::USER_REQUESTED
                                                      : RequestType::AUTO_SELECTED;
 
-                Expected<BinaryControlFile> maybe_bpgh = Paragraphs::try_load_cached_control_package(paths, spec);
-                if (auto bcf = maybe_bpgh.get())
-                    return ExportPlanAction{spec, AnyParagraph{nullopt, std::move(*bcf), nullopt}, request_type};
+                auto maybe_ipv = status_db.find_all_installed(spec);
 
-                auto maybe_scf = provider.get_control_file(spec.name());
-                if (auto scf = maybe_scf.get()) return ExportPlanAction{spec, {nullopt, nullopt, scf}, request_type};
+                if (auto p_ipv = maybe_ipv.get())
+                {
+                    return ExportPlanAction{spec, std::move(*p_ipv), request_type};
+                }
 
-                Checks::exit_with_message(VCPKG_LINE_INFO, "Could not find package %s", spec);
+                return ExportPlanAction{spec, request_type};
             }
 
             std::string to_string(const PackageSpec& spec) const override { return spec.to_string(); }
@@ -440,23 +407,59 @@ namespace vcpkg::Dependencies
 
     static MarkPlusResult mark_plus(const std::string& feature,
                                     Cluster& cluster,
-                                    ClusterGraph& pkg_to_cluster,
-                                    GraphPlan& graph_plan);
+                                    ClusterGraph& graph,
+                                    GraphPlan& graph_plan,
+                                    const std::unordered_set<std::string>& prevent_default_features = {});
 
-    static void mark_minus(Cluster& cluster, ClusterGraph& pkg_to_cluster, GraphPlan& graph_plan);
+    static void mark_minus(Cluster& cluster, ClusterGraph& graph, GraphPlan& graph_plan);
 
-    MarkPlusResult mark_plus(const std::string& feature, Cluster& cluster, ClusterGraph& graph, GraphPlan& graph_plan)
+    MarkPlusResult mark_plus(const std::string& feature,
+                             Cluster& cluster,
+                             ClusterGraph& graph,
+                             GraphPlan& graph_plan,
+                             const std::unordered_set<std::string>& prevent_default_features)
     {
         if (feature.empty())
         {
-            // Indicates that core was not specified in the reference
-            return mark_plus("core", cluster, graph, graph_plan);
+            if (prevent_default_features.find(cluster.spec.name()) == prevent_default_features.end())
+            {
+                // Indicates that core was not specified in the reference
+
+                // Add default features for this package, if this is the "core" feature and we
+                // are not supposed to prevent default features for this package
+                if (auto scf = cluster.source_control_file.value_or(nullptr))
+                {
+                    for (auto&& default_feature : scf->core_paragraph.get()->default_features)
+                    {
+                        auto res = mark_plus(default_feature, cluster, graph, graph_plan, prevent_default_features);
+                        if (res != MarkPlusResult::SUCCESS)
+                        {
+                            return res;
+                        }
+                    }
+                }
+
+                // "core" is always an implicit default feature. In case we did not add it as
+                // a dependency above (e.g. no default features), add it here.
+                auto res = mark_plus("core", cluster, graph, graph_plan, prevent_default_features);
+                if (res != MarkPlusResult::SUCCESS)
+                {
+                    return res;
+                }
+
+                return MarkPlusResult::SUCCESS;
+            }
+            else
+            {
+                // Skip adding the default features, as explicitly told not to.
+                return MarkPlusResult::SUCCESS;
+            }
         }
 
-        auto it = cluster.edges.find(feature);
-        if (it == cluster.edges.end()) return MarkPlusResult::FEATURE_NOT_FOUND;
+        auto it = cluster.edges_by_feature.find(feature);
+        if (it == cluster.edges_by_feature.end()) return MarkPlusResult::FEATURE_NOT_FOUND;
 
-        if (cluster.edges[feature].plus) return MarkPlusResult::SUCCESS;
+        if (cluster.edges_by_feature[feature].plus) return MarkPlusResult::SUCCESS;
 
         if (cluster.original_features.find(feature) == cluster.original_features.end())
         {
@@ -467,7 +470,7 @@ namespace vcpkg::Dependencies
         {
             return MarkPlusResult::SUCCESS;
         }
-        cluster.edges[feature].plus = true;
+        cluster.edges_by_feature[feature].plus = true;
 
         if (!cluster.original_features.empty())
         {
@@ -481,16 +484,21 @@ namespace vcpkg::Dependencies
         if (feature != "core")
         {
             // All features implicitly depend on core
-            auto res = mark_plus("core", cluster, graph, graph_plan);
+            auto res = mark_plus("core", cluster, graph, graph_plan, prevent_default_features);
 
             // Should be impossible for "core" to not exist
             Checks::check_exit(VCPKG_LINE_INFO, res == MarkPlusResult::SUCCESS);
         }
+        else
+        {
+            // Add the default features of this package.
+            auto res = mark_plus("", cluster, graph, graph_plan, prevent_default_features);
+        }
 
-        for (auto&& depend : cluster.edges[feature].build_edges)
+        for (auto&& depend : cluster.edges_by_feature[feature].build_edges)
         {
             auto& depend_cluster = graph.get(depend.spec());
-            auto res = mark_plus(depend.feature(), depend_cluster, graph, graph_plan);
+            auto res = mark_plus(depend.feature(), depend_cluster, graph, graph_plan, prevent_default_features);
 
             Checks::check_exit(VCPKG_LINE_INFO,
                                res == MarkPlusResult::SUCCESS,
@@ -510,8 +518,20 @@ namespace vcpkg::Dependencies
         if (cluster.will_remove) return;
         cluster.will_remove = true;
 
+        std::unordered_set<std::string> prevent_default_features;
+
+        if (cluster.request_type == RequestType::USER_REQUESTED)
+        {
+            // Do not install default features for packages which the user
+            // installed explicitly. New default features for dependent
+            // clusters should still be upgraded.
+            prevent_default_features.insert(cluster.spec.name());
+
+            // For dependent packages this is handles through the recursion
+        }
+
         graph_plan.remove_graph.add_vertex({&cluster});
-        for (auto&& pair : cluster.edges)
+        for (auto&& pair : cluster.edges_by_feature)
         {
             auto& remove_edges_edges = pair.second.remove_edges;
             for (auto&& depend : remove_edges_edges)
@@ -525,7 +545,7 @@ namespace vcpkg::Dependencies
         cluster.transient_uninstalled = true;
         for (auto&& original_feature : cluster.original_features)
         {
-            auto res = mark_plus(original_feature, cluster, graph, graph_plan);
+            auto res = mark_plus(original_feature, cluster, graph, graph_plan, prevent_default_features);
             if (res != MarkPlusResult::SUCCESS)
             {
                 System::println(System::Color::warning,
@@ -533,19 +553,54 @@ namespace vcpkg::Dependencies
                                 FeatureSpec{cluster.spec, original_feature});
             }
         }
+
+        // Check if any default features have been added
+        if (auto scf = cluster.source_control_file.value_or(nullptr))
+        {
+            auto& previous_df = cluster.installed_package.core->package.default_features;
+            for (auto&& default_feature : scf->core_paragraph->default_features)
+            {
+                if (std::find(previous_df.begin(), previous_df.end(), default_feature) == previous_df.end())
+                {
+                    // this is a new default feature, mark it for installation
+                    auto res = mark_plus(default_feature, cluster, graph, graph_plan);
+                    if (res != MarkPlusResult::SUCCESS)
+                    {
+                        System::println(System::Color::warning,
+                                        "Warning: could not install new default feature %s",
+                                        FeatureSpec{cluster.spec, default_feature});
+                    }
+                }
+            }
+        }
     }
 
+    /// <summary>Figure out which actions are required to install features specifications in `specs`.</summary>
+    /// <param name="provider">Contains the ports of the current environment.</param>
+    /// <param name="specs">Feature specifications to resolve dependencies for.</param>
+    /// <param name="status_db">Status of installed packages in the current environment.</param>
     std::vector<AnyAction> create_feature_install_plan(const PortFileProvider& provider,
                                                        const std::vector<FeatureSpec>& specs,
                                                        const StatusParagraphs& status_db)
     {
+        std::unordered_set<std::string> prevent_default_features;
+        for (auto&& spec : specs)
+        {
+            // When "core" is explicitly listed, default features should not be installed.
+            if (spec.feature() == "core") prevent_default_features.insert(spec.name());
+        }
+
         PackageGraph pgraph(provider, status_db);
         for (auto&& spec : specs)
-            pgraph.install(spec);
+            pgraph.install(spec, prevent_default_features);
 
         return pgraph.serialize();
     }
 
+    /// <summary>Figure out which actions are required to install features specifications in `specs`.</summary>
+    /// <param name="map">Map of all source files in the current environment.</param>
+    /// <param name="specs">Feature specifications to resolve dependencies for.</param>
+    /// <param name="status_db">Status of installed packages in the current environment.</param>
     std::vector<AnyAction> create_feature_install_plan(const std::unordered_map<std::string, SourceControlFile>& map,
                                                        const std::vector<FeatureSpec>& specs,
                                                        const StatusParagraphs& status_db)
@@ -554,7 +609,12 @@ namespace vcpkg::Dependencies
         return create_feature_install_plan(provider, specs, status_db);
     }
 
-    void PackageGraph::install(const FeatureSpec& spec)
+    /// <param name="prevent_default_features">
+    /// List of package names for which default features should not be installed instead of the core package (e.g. if
+    /// the user is currently installing specific features of that package).
+    /// </param>
+    void PackageGraph::install(const FeatureSpec& spec,
+                               const std::unordered_set<std::string>& prevent_default_features) const
     {
         Cluster& spec_cluster = m_graph->get(spec.spec());
         spec_cluster.request_type = RequestType::USER_REQUESTED;
@@ -564,13 +624,14 @@ namespace vcpkg::Dependencies
             {
                 for (auto&& feature : p_scf->feature_paragraphs)
                 {
-                    auto res = mark_plus(feature->name, spec_cluster, *m_graph, *m_graph_plan);
+                    auto res =
+                        mark_plus(feature->name, spec_cluster, *m_graph, *m_graph_plan, prevent_default_features);
 
                     Checks::check_exit(
                         VCPKG_LINE_INFO, res == MarkPlusResult::SUCCESS, "Error: Unable to locate feature %s", spec);
                 }
 
-                auto res = mark_plus("core", spec_cluster, *m_graph, *m_graph_plan);
+                auto res = mark_plus("core", spec_cluster, *m_graph, *m_graph_plan, prevent_default_features);
 
                 Checks::check_exit(
                     VCPKG_LINE_INFO, res == MarkPlusResult::SUCCESS, "Error: Unable to locate feature %s", spec);
@@ -583,7 +644,7 @@ namespace vcpkg::Dependencies
         }
         else
         {
-            auto res = mark_plus(spec.feature(), spec_cluster, *m_graph, *m_graph_plan);
+            auto res = mark_plus(spec.feature(), spec_cluster, *m_graph, *m_graph_plan, prevent_default_features);
 
             Checks::check_exit(
                 VCPKG_LINE_INFO, res == MarkPlusResult::SUCCESS, "Error: Unable to locate feature %s", spec);
@@ -592,7 +653,7 @@ namespace vcpkg::Dependencies
         m_graph_plan->install_graph.add_vertex(ClusterPtr{&spec_cluster});
     }
 
-    void PackageGraph::upgrade(const PackageSpec& spec)
+    void PackageGraph::upgrade(const PackageSpec& spec) const
     {
         Cluster& spec_cluster = m_graph->get(spec);
         spec_cluster.request_type = RequestType::USER_REQUESTED;
@@ -642,6 +703,7 @@ namespace vcpkg::Dependencies
                 if (p_cluster->request_type != RequestType::USER_REQUESTED) continue;
                 plan.emplace_back(InstallPlanAction{
                     p_cluster->spec,
+                    InstalledPackageView{p_cluster->installed_package},
                     p_cluster->original_features,
                     p_cluster->request_type,
                 });
@@ -664,17 +726,18 @@ namespace vcpkg::Dependencies
 
             cluster.transient_uninstalled = false;
 
-            cluster.status_paragraphs.emplace_back(status_paragraph);
-
             auto& status_paragraph_feature = status_paragraph->package.feature;
+
             // In this case, empty string indicates the "core" paragraph for a package.
             if (status_paragraph_feature.empty())
             {
                 cluster.original_features.insert("core");
+                cluster.installed_package.core = status_paragraph;
             }
             else
             {
                 cluster.original_features.insert(status_paragraph_feature);
+                cluster.installed_package.features.emplace_back(status_paragraph);
             }
         }
 
@@ -693,7 +756,7 @@ namespace vcpkg::Dependencies
                 auto depends_name = dependency.feature();
                 if (depends_name.empty()) depends_name = "core";
 
-                auto& target_node = dep_cluster.edges[depends_name];
+                auto& target_node = dep_cluster.edges_by_feature[depends_name];
                 target_node.remove_edges.emplace_back(FeatureSpec{spec, status_paragraph_feature});
             }
         }
@@ -701,11 +764,11 @@ namespace vcpkg::Dependencies
     }
 
     PackageGraph::PackageGraph(const PortFileProvider& provider, const StatusParagraphs& status_db)
-        : m_graph(create_feature_install_graph(provider, status_db)), m_graph_plan(std::make_unique<GraphPlan>())
+        : m_graph_plan(std::make_unique<GraphPlan>()), m_graph(create_feature_install_graph(provider, status_db))
     {
     }
 
-    PackageGraph::~PackageGraph() {}
+    PackageGraph::~PackageGraph() = default;
 
     void print_plan(const std::vector<AnyAction>& action_plan, const bool is_recursive)
     {
@@ -739,7 +802,6 @@ namespace vcpkg::Dependencies
                 {
                     switch (install_action->plan_type)
                     {
-                        case InstallPlanType::INSTALL: only_install_plans.emplace_back(install_action); break;
                         case InstallPlanType::ALREADY_INSTALLED:
                             if (install_action->request_type == RequestType::USER_REQUESTED)
                                 already_installed_plans.emplace_back(install_action);
@@ -769,29 +831,29 @@ namespace vcpkg::Dependencies
             });
         };
 
-        if (excluded.size() > 0)
+        if (!excluded.empty())
         {
             System::println("The following packages are excluded:\n%s", actions_to_output_string(excluded));
         }
 
-        if (already_installed_plans.size() > 0)
+        if (!already_installed_plans.empty())
         {
             System::println("The following packages are already installed:\n%s",
                             actions_to_output_string(already_installed_plans));
         }
 
-        if (rebuilt_plans.size() > 0)
+        if (!rebuilt_plans.empty())
         {
             System::println("The following packages will be rebuilt:\n%s", actions_to_output_string(rebuilt_plans));
         }
 
-        if (new_plans.size() > 0)
+        if (!new_plans.empty())
         {
             System::println("The following packages will be built and installed:\n%s",
                             actions_to_output_string(new_plans));
         }
 
-        if (only_install_plans.size() > 0)
+        if (!only_install_plans.empty())
         {
             System::println("The following packages will be directly installed:\n%s",
                             actions_to_output_string(only_install_plans));
@@ -800,7 +862,7 @@ namespace vcpkg::Dependencies
         if (has_non_user_requested_packages)
             System::println("Additional packages (*) will be modified to complete this operation.");
 
-        if (remove_plans.size() > 0 && !is_recursive)
+        if (!remove_plans.empty() && !is_recursive)
         {
             System::println(System::Color::warning,
                             "If you are sure you want to rebuild the above packages, run the command with the "
