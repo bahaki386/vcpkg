@@ -1,7 +1,5 @@
 #pragma once
 
-#include <unordered_map>
-
 #include <vcpkg/base/files.h>
 #include <vcpkg/base/optional.h>
 #include <vcpkg/base/strings.h>
@@ -40,8 +38,7 @@ namespace vcpkg::System
         std::string output;
     };
 
-    int cmd_execute_clean(const CStringView cmd_line,
-                          const std::unordered_map<std::string, std::string>& extra_env = {});
+    int cmd_execute_clean(const CStringView cmd_line);
 
     int cmd_execute(const CStringView cmd_line);
 
