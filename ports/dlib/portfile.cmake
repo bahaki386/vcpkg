@@ -1,10 +1,15 @@
 include(vcpkg_common_functions)
 
+if(VCPKG_LIBRARY_LINKAGE STREQUAL "dynamic")
+    message("dlib only supports static linkage")
+    set(VCPKG_LIBRARY_LINKAGE "static")
+endif()
+
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO davisking/dlib
-    REF v19.9
-    SHA512 1e2123c22e1b13cc84108fa627bfa92eadc9dee63f93a9f45676bbf2b752c8728117d915ac327f5223b0cdbce87dd3bef2f4d8d5ed3f8f5a314ffa9e8962a246
+    REF v19.13
+    SHA512 3b6869cb9b08d98152bc0d474714f5d342e3d35e6226e5eeb54216ad64d0d0a48a5bf0e78a7db68540b5f593c74f2b3cefac2f545e4038130283c127a16cd00f
     HEAD_REF master
 )
 
@@ -57,6 +62,7 @@ file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/include/dlib/cmake_utils/test_for_ne
 file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/include/dlib/cmake_utils/test_for_cudnn)
 file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/include/dlib/cmake_utils/test_for_cuda)
 file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/include/dlib/cmake_utils/test_for_cpp11)
+file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/include/dlib/cmake_utils/test_for_avx)
 file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/include/dlib/external/libpng/arm)
 
 # Dlib encodes debug/release in its config.h. Patch it to respond to the NDEBUG macro instead.

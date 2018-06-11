@@ -1,21 +1,10 @@
-# Common Ambient Variables:
-#   CURRENT_BUILDTREES_DIR    = ${VCPKG_ROOT_DIR}\buildtrees\${PORT}
-#   CURRENT_PACKAGES_DIR      = ${VCPKG_ROOT_DIR}\packages\${PORT}_${TARGET_TRIPLET}
-#   CURRENT_PORT_DIR          = ${VCPKG_ROOT_DIR}\ports\${PORT}
-#   PORT                      = current port name (zlib, etc)
-#   TARGET_TRIPLET            = current triplet (x86-windows, x64-windows-static, etc)
-#   VCPKG_CRT_LINKAGE         = C runtime linkage type (static, dynamic)
-#   VCPKG_LIBRARY_LINKAGE     = target library linkage type (static, dynamic)
-#   VCPKG_ROOT_DIR            = <C:\path\to\current\vcpkg>
-#   VCPKG_TARGET_ARCHITECTURE = target architecture (x64, x86, arm)
-#
 include(vcpkg_common_functions)
 
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO ThePhD/sol2
-    REF v2.18.7
-    SHA512 747dbcba2da4e44bfb365c0fd0c8df916d0e5d0ddbaa9df514838d84a8fd4261c87db7d14d9683b708b874cd6a73586e7854d9a784743a737858b73acdd78f1c
+    REF f8ee7abe527a9e8414fc4965e5cbd0f8395fbeae
+    SHA512 6bf090deb3b664e9585672b8f85275b76c53eddc7fe206ceec943522195bb726e976c946b59cc23863bc7e0feab36f4fe1a6a7a5dae3f9c2ec5c64060014afbf
     HEAD_REF develop
 )
 
